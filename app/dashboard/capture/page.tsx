@@ -667,7 +667,7 @@ export default function CapturePage() {
                             <ArrowLeft className="h-6 w-6" />
                         </Button>
                     </Link>
-                    <h1 className="text-white font-semibold">Capture Wound</h1>
+                    <h1 className="text-white font-semibold">Podiaguard</h1>
                     <div className="w-10" />
                 </div>
 

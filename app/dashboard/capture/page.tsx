@@ -7,19 +7,25 @@ import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import { ArrowLeft, Camera, Check, X, RotateCcw, Upload, Loader2, CheckCircle, Sparkles, Move, Sun, Moon, ArrowUp, ArrowDown } from "lucide-react"
+import { ArrowLeft, Camera, Check, X, RotateCcw, Upload, Loader2, CheckCircle, Sparkles, Move, Sun, Moon, ArrowUp, ArrowDown, ArrowRight } from "lucide-react"
 import Link from "next/link"
-import * as tf from "@tensorflow/tfjs"
-import * as poseDetection from "@tensorflow-models/pose-detection"
 import { DISTANCE_CONFIG, LIGHTING_CONFIG } from "./capture-config"
 
 type CaptureStep = "camera" | "preview" | "confirm" | "success"
 
 type DetectionStatus = {
-    hasFoot: boolean
+    hasCellPhone: boolean
     distance: "too-close" | "too-far" | "ideal" | "unknown"
     lighting: "too-dark" | "too-bright" | "ideal" | "unknown"
-    footBoundingBox: { x: number; y: number; width: number; height: number } | null
+    cellPhoneBoundingBox: { x: number; y: number; width: number; height: number } | null
+}
+
+type ObjectDetector = {
+    detect: (input: HTMLVideoElement | HTMLCanvasElement | ImageData | HTMLImageElement) => Promise<Array<{
+        bbox: [number, number, number, number] // [x, y, width, height]
+        class: string
+        score: number
+    }>>
 }
 
 export default function CapturePage() {
@@ -33,13 +39,14 @@ export default function CapturePage() {
     const [cameraError, setCameraError] = useState<string | null>(null)
     const [uploadedImageId, setUploadedImageId] = useState<string | null>(null)
     const [detectionStatus, setDetectionStatus] = useState<DetectionStatus>({
-        hasFoot: false,
+        hasCellPhone: false,
         distance: "unknown",
         lighting: "unknown",
-        footBoundingBox: null,
+        cellPhoneBoundingBox: null,
     })
     const [modelLoading, setModelLoading] = useState(true)
-    const [detector, setDetector] = useState<poseDetection.PoseDetector | null>(null)
+    const [detector, setDetector] = useState<ObjectDetector | null>(null)
+    const [detectedObjects, setDetectedObjects] = useState<Array<{ bbox: [number, number, number, number], class: string, score: number }>>([])
 
     const videoRef = useRef<HTMLVideoElement>(null)
     const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -48,30 +55,142 @@ export default function CapturePage() {
     const router = useRouter()
     const supabase = getSupabaseBrowserClient()
 
-    // Load TensorFlow.js pose detection model
+    // Image processing fallback to detect cell phone-like shapes
+    const detectCellPhoneWithImageProcessing = useCallback(async (input: HTMLVideoElement | HTMLCanvasElement): Promise<any[]> => {
+        const canvas = document.createElement('canvas')
+        const ctx = canvas.getContext('2d')
+        if (!ctx) return []
+
+        if (input instanceof HTMLVideoElement) {
+            canvas.width = input.videoWidth || 640
+            canvas.height = input.videoHeight || 480
+            ctx.drawImage(input, 0, 0)
+        } else {
+            canvas.width = input.width
+            canvas.height = input.height
+            ctx.drawImage(input, 0, 0)
+        }
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+        const data = imageData.data
+
+        // Simple edge detection and contour finding for cell phone-like shapes
+        // Look for rectangular objects with phone-like aspect ratios
+        const cellPhoneCandidates: Array<{ bbox: [number, number, number, number], score: number, class: string }> = []
+
+        // Detect regions with distinct edges (phones often have clear edges and screens)
+        const edgeRegions: Array<{ x: number, y: number }> = []
+        for (let i = 0; i < data.length; i += 16) { // Sample every 4th pixel
+            const x = (i / 4) % canvas.width
+            const y = Math.floor((i / 4) / canvas.width)
+
+            if (x === 0 || y === 0 || x >= canvas.width - 1 || y >= canvas.height - 1) continue
+
+            const r = data[i]
+            const g = data[i + 1]
+            const b = data[i + 2]
+
+            // Get neighboring pixels for edge detection
+            const rightIdx = i + 4
+            const downIdx = i + (canvas.width * 4)
+
+            if (rightIdx < data.length && downIdx < data.length) {
+                const rRight = data[rightIdx]
+                const gRight = data[rightIdx + 1]
+                const bRight = data[rightIdx + 2]
+                const rDown = data[downIdx]
+                const gDown = data[downIdx + 1]
+                const bDown = data[downIdx + 2]
+
+                // Detect edges (significant color change) - phones have sharp edges
+                const edgeStrength = Math.abs(r - rRight) + Math.abs(g - gRight) + Math.abs(b - bRight) +
+                    Math.abs(r - rDown) + Math.abs(g - gDown) + Math.abs(b - bDown)
+
+                if (edgeStrength > 40) { // Higher threshold for phones (sharper edges)
+                    edgeRegions.push({ x, y })
+                }
+            }
+        }
+
+        // Group edge regions into potential cell phone bounding boxes
+        if (edgeRegions.length > 100) { // Need enough pixels
+            const xs = edgeRegions.map(p => p.x)
+            const ys = edgeRegions.map(p => p.y)
+            const minX = Math.min(...xs)
+            const maxX = Math.max(...xs)
+            const minY = Math.min(...ys)
+            const maxY = Math.max(...ys)
+
+            const width = maxX - minX
+            const height = maxY - minY
+            const aspectRatio = width / height
+
+            // Check if it matches cell phone characteristics (rectangular, typically 0.5-2.0 aspect ratio)
+            // Phones can be portrait (0.5-0.7) or landscape (1.4-2.0)
+            if (aspectRatio >= 0.4 && aspectRatio <= 2.2 && // Cell phone-like aspect ratio (rectangular)
+                width >= 40 && height >= 40 && // Minimum size (pixels) - phones are reasonably sized
+                width <= canvas.width * 0.8 && height <= canvas.height * 0.8) { // Maximum size
+
+                cellPhoneCandidates.push({
+                    bbox: [minX, minY, width, height],
+                    score: 0.7, // Medium-high confidence for image processing
+                    class: 'cell phone'
+                })
+            }
+        }
+
+        return cellPhoneCandidates
+    }, [])
+
+    // Load detection model with hybrid approach: COCO-SSD + image processing
     useEffect(() => {
+        // Ensure we're in the browser
+        if (typeof window === 'undefined') return
+
         let mounted = true
 
         const loadModel = async () => {
             try {
+                // Dynamically import TensorFlow and COCO-SSD to avoid SSR issues
+                const tf = await import("@tensorflow/tfjs")
+                const cocoSsd = await import("@tensorflow-models/coco-ssd")
+
                 await tf.ready()
-                // Use MoveNet for fast, accurate pose detection
-                // MoveNet can detect body keypoints including ankles and feet
-                const model = poseDetection.SupportedModels.MoveNet
-                const detectorConfig: poseDetection.MoveNetModelConfig = {
-                    modelType: poseDetection.movenet.modelType.SINGLEPOSE_THUNDER, // More accurate
-                    enableSmoothing: true,
+
+                // Load COCO-SSD model for object detection
+                const cocoModel = await cocoSsd.load({
+                    base: 'mobilenet_v2', // Faster, lighter model
+                })
+
+                // Create a hybrid detector that combines COCO-SSD with image processing
+                const hybridDetector = {
+                    type: 'hybrid',
+                    model: cocoModel,
+                    detect: async (input: HTMLVideoElement | HTMLCanvasElement) => {
+                        // First try COCO-SSD
+                        const detections = await cocoModel.detect(input)
+
+                        // If no good detections, try image processing fallback
+                        if (detections.length === 0 || detections.every(d => d.score < 0.3)) {
+                            return await detectCellPhoneWithImageProcessing(input)
+                        }
+
+                        return detections
+                    }
                 }
-                const loadedDetector = await poseDetection.createDetector(model, detectorConfig)
+
+                console.log("✅ Hybrid detector (COCO-SSD + Image Processing) loaded successfully")
+
                 if (mounted) {
-                    setDetector(loadedDetector)
+                    setDetector(hybridDetector as any)
                     setModelLoading(false)
+                    console.log("Using hybrid detection (works from any angle)")
                 }
             } catch (err) {
-                console.error("Failed to load pose detection model:", err)
+                console.error("Failed to load detection model:", err)
                 if (mounted) {
                     setModelLoading(false)
-                    setError("Failed to load AI model. Some features may not work.")
+                    setError(`Failed to load AI model: ${err instanceof Error ? err.message : 'Unknown error'}. Some features may not work.`)
                 }
             }
         }
@@ -111,26 +230,60 @@ export default function CapturePage() {
         }
     }, [])
 
-    // Analyze distance based on foot size in frame
+    // Analyze distance based on cell phone size in frame
     const analyzeDistance = useCallback((
-        footBox: { x: number; y: number; width: number; height: number },
+        cellPhoneBox: { x: number; y: number; width: number; height: number },
         frameWidth: number,
         frameHeight: number
     ): "too-close" | "too-far" | "ideal" => {
-        // Calculate what percentage of the frame height the foot occupies
-        const footHeightRatio = footBox.height / frameHeight
+        // Calculate what percentage of the frame height the cell phone occupies
+        const cellPhoneHeightRatio = cellPhoneBox.height / frameHeight
 
         // Debug logging (can be removed in production)
-        // console.log("Foot height:", footBox.height, "Frame height:", frameHeight, "Ratio:", footHeightRatio.toFixed(3))
+        // console.log("Cell phone height:", cellPhoneBox.height, "Frame height:", frameHeight, "Ratio:", cellPhoneHeightRatio.toFixed(3))
 
-        if (footHeightRatio < DISTANCE_CONFIG.minDistance) {
+        if (cellPhoneHeightRatio < DISTANCE_CONFIG.minDistance) {
             return "too-far"
-        } else if (footHeightRatio > DISTANCE_CONFIG.maxDistance) {
+        } else if (cellPhoneHeightRatio > DISTANCE_CONFIG.maxDistance) {
             return "too-close"
         } else {
             return "ideal"
         }
     }, [])
+
+    // Calculate cell phone position relative to ideal center
+    const getPositionGuidance = useCallback((): {
+        left: boolean
+        right: boolean
+        up: boolean
+        down: boolean
+    } => {
+        if (!detectionStatus.cellPhoneBoundingBox || !videoRef.current) {
+            return { left: false, right: false, up: false, down: false }
+        }
+
+        const videoWidth = videoRef.current.videoWidth || 640
+        const videoHeight = videoRef.current.videoHeight || 480
+        const cellPhoneBox = detectionStatus.cellPhoneBoundingBox
+
+        // Ideal center position (center of frame)
+        const idealCenterX = videoWidth / 2
+        const idealCenterY = videoHeight / 2
+
+        // Cell phone center position
+        const cellPhoneCenterX = cellPhoneBox.x + cellPhoneBox.width / 2
+        const cellPhoneCenterY = cellPhoneBox.y + cellPhoneBox.height / 2
+
+        // Threshold for "close enough" (10% of frame size)
+        const threshold = Math.min(videoWidth, videoHeight) * 0.1
+
+        return {
+            left: cellPhoneCenterX < idealCenterX - threshold,
+            right: cellPhoneCenterX > idealCenterX + threshold,
+            up: cellPhoneCenterY < idealCenterY - threshold,
+            down: cellPhoneCenterY > idealCenterY + threshold,
+        }
+    }, [detectionStatus.cellPhoneBoundingBox])
 
     // Run detection and analysis
     const runDetection = useCallback(async () => {
@@ -146,123 +299,168 @@ export default function CapturePage() {
         if (!ctx) return
 
         // Set canvas size to match video
-        analysisCanvas.width = video.videoWidth || 640
-        analysisCanvas.height = video.videoHeight || 480
+        const videoWidth = video.videoWidth || 640
+        const videoHeight = video.videoHeight || 480
+        analysisCanvas.width = videoWidth
+        analysisCanvas.height = videoHeight
 
         // Draw current frame
-        ctx.drawImage(video, 0, 0, analysisCanvas.width, analysisCanvas.height)
+        ctx.drawImage(video, 0, 0, videoWidth, videoHeight)
 
         // Get image data for lighting analysis
-        const imageData = ctx.getImageData(0, 0, analysisCanvas.width, analysisCanvas.height)
+        const imageData = ctx.getImageData(0, 0, videoWidth, videoHeight)
         const lighting = analyzeLighting(imageData)
 
-        // Run pose detection to find foot keypoints
+        // Debug: Log video state
+        console.log("Video state:", {
+            readyState: video.readyState,
+            videoWidth,
+            videoHeight,
+            playing: !video.paused,
+            detectorReady: !!detector
+        })
+
+        // Run hybrid detection to find cell phones (works from any angle)
         try {
-            const poses = await detector.estimatePoses(video, {
-                flipHorizontal: false,
-                maxPoses: 1, // We only need one person
-            })
+            // Hybrid detector: COCO-SSD first, then image processing fallback
+            const detections = await detector.detect(video)
 
-            let footBox: { x: number; y: number; width: number; height: number } | null = null
-            let hasFoot = false
+            console.log(`Detected ${detections.length} objects:`, detections.map(d => `${d.class} (${(d.score * 100).toFixed(1)}%)`))
 
-            if (poses.length > 0) {
-                const pose = poses[0]
-                const keypoints = pose.keypoints
+            // Store all detected objects for visualization
+            setDetectedObjects(detections)
 
-                // MoveNet keypoint indices (17 keypoints total):
-                // 15: left_ankle (index 15)
-                // 16: right_ankle (index 16)
-                // Note: MoveNet doesn't have separate foot_index keypoints, so we use ankles
-                // and estimate foot area below the ankles
+            let cellPhoneBox: { x: number; y: number; width: number; height: number } | null = null
+            let hasCellPhone = false
 
-                // Get ankle keypoints by index (MoveNet uses numeric indices)
-                const leftAnkle = keypoints[15]  // left_ankle
-                const rightAnkle = keypoints[16] // right_ankle
+            // Function to determine if a detected object is likely a cell phone
+            const evaluateCellPhoneLikelihood = (detection: any, frameWidth: number, frameHeight: number): { isCellPhone: boolean, score: number } => {
+                const [x, y, width, height] = detection.bbox
+                const centerY = y + height / 2
+                const centerX = x + width / 2
+                const aspectRatio = width / height
+                const area = width * height
+                const frameArea = frameWidth * frameHeight
+                const areaRatio = area / frameArea
 
-                // Collect valid ankle points (confidence > 0.3)
-                const anklePoints: Array<{ x: number; y: number }> = []
+                // Cell phone detection heuristics:
+                // 1. Aspect ratio: cell phones are rectangular (0.4-2.2 width/height ratio)
+                // 2. Size: should be reasonable size relative to frame (not too small, not too large)
+                // 3. Position: can be anywhere in frame
+                // 4. Shape: rectangular, can be portrait or landscape
 
-                if (leftAnkle && leftAnkle.score && leftAnkle.score > 0.3) {
-                    anklePoints.push({ x: leftAnkle.x, y: leftAnkle.y })
+                const isCellPhoneLike =
+                    aspectRatio >= 0.4 && aspectRatio <= 2.2 && // Cell phone-like aspect ratio (rectangular)
+                    areaRatio >= 0.01 && areaRatio <= 0.5 && // Reasonable size (1% to 50% of frame)
+                    width >= 40 && height >= 40 && // Minimum size (pixels) - phones are reasonably sized
+                    width <= frameWidth * 0.8 && height <= frameHeight * 0.8 // Maximum size
+
+                if (!isCellPhoneLike) {
+                    return { isCellPhone: false, score: 0 }
                 }
-                if (rightAnkle && rightAnkle.score && rightAnkle.score > 0.3) {
-                    anklePoints.push({ x: rightAnkle.x, y: rightAnkle.y })
+
+                // Calculate cell phone score based on multiple factors
+                let cellPhoneScore = detection.score
+
+                // Boost score if aspect ratio is in ideal cell phone range (0.5-1.8)
+                if (aspectRatio >= 0.5 && aspectRatio <= 1.8) {
+                    cellPhoneScore *= 1.5
                 }
 
-                // If we have at least one ankle point, consider it a foot detection
-                if (anklePoints.length > 0) {
-                    hasFoot = true
+                // Boost score if size is in ideal range (3-25% of frame)
+                if (areaRatio >= 0.03 && areaRatio <= 0.25) {
+                    cellPhoneScore *= 1.3
+                }
 
-                    // Calculate bounding box from ankle points
-                    const xs = anklePoints.map(p => p.x)
-                    const ys = anklePoints.map(p => p.y)
-                    const minX = Math.min(...xs)
-                    const maxX = Math.max(...xs)
-                    const minY = Math.min(...ys)
-                    const maxY = Math.max(...ys)
+                // Check if it's a "cell phone" or "phone" class from COCO-SSD (if available)
+                if (detection.class === 'cell phone' || detection.class === 'phone' || detection.class === 'mobile phone') {
+                    cellPhoneScore *= 2.0 // Strong boost for direct phone detection
+                }
 
-                    // Estimate foot area: extend below ankles (feet are below ankles)
-                    // Use the distance between ankles to estimate foot size
-                    const ankleWidth = maxX - minX || 60 // Default if only one ankle
-                    const ankleSeparation = Math.max(ankleWidth, 40) // Minimum separation
+                // Accept objects that match cell phone characteristics
+                return { isCellPhone: true, score: cellPhoneScore }
+            }
 
-                    // Foot extends below ankles - use a more accurate calculation
-                    // Average foot length is about 1.5-2x the ankle width
-                    // For close-up shots, this ratio helps detect when too close
-                    const footExtension = Math.max(ankleSeparation * 2.0, 100) // More generous extension
+            // Find the best cell phone candidate (any object that looks like a cell phone)
+            let bestCellPhoneDetection: any = null
+            let bestCellPhoneScore = 0
 
-                    // Add horizontal padding (feet are wider than ankle width)
-                    const horizontalPadding = Math.max(ankleSeparation * 0.4, 25)
+            for (const detection of detections) {
+                const evaluation = evaluateCellPhoneLikelihood(detection, videoWidth, videoHeight)
 
-                    // Calculate foot bounding box
-                    // Start from the highest ankle point (top of foot area)
-                    const footMinX = Math.max(0, minX - horizontalPadding)
-                    const footMaxX = Math.min(analysisCanvas.width, maxX + horizontalPadding)
-                    const footMinY = Math.max(0, minY - 10) // Slight padding above ankles
-                    // Extend below the lowest ankle point
-                    const footMaxY = Math.min(analysisCanvas.height, maxY + footExtension)
-
-                    const calculatedHeight = footMaxY - footMinY
-                    const calculatedWidth = footMaxX - footMinX
-
-                    footBox = {
-                        x: footMinX,
-                        y: footMinY,
-                        width: calculatedWidth,
-                        height: calculatedHeight, // This is what we use for distance
-                    }
-
-                    // Debug: Log when foot is detected as too close
-                    const heightRatio = calculatedHeight / analysisCanvas.height
-                    if (heightRatio > DISTANCE_CONFIG.maxDistance) {
-                        console.log("Too close detected:", {
-                            footHeight: calculatedHeight,
-                            frameHeight: analysisCanvas.height,
-                            ratio: heightRatio.toFixed(3),
-                            maxDistance: DISTANCE_CONFIG.maxDistance
-                        })
-                    }
+                if (evaluation.isCellPhone && evaluation.score > bestCellPhoneScore) {
+                    bestCellPhoneScore = evaluation.score
+                    bestCellPhoneDetection = detection
                 }
             }
 
-            const distance = footBox
-                ? analyzeDistance(footBox, analysisCanvas.width, analysisCanvas.height)
+            // If COCO-SSD didn't find good cell phone detections, try image processing fallback
+            if (!bestCellPhoneDetection || bestCellPhoneScore < 0.5) {
+                console.log("COCO-SSD didn't find good cell phone detection - trying image processing fallback...")
+
+                // Use image processing to detect cell phone-like shapes
+                const fallbackDetections = await detectCellPhoneWithImageProcessing(video)
+                if (fallbackDetections.length > 0) {
+                    bestCellPhoneDetection = fallbackDetections[0]
+                    bestCellPhoneScore = fallbackDetections[0].score
+                    console.log("✅ Image processing found cell phone-like shape!")
+                }
+            }
+
+            // If we found a likely cell phone, create bounding box
+            if (bestCellPhoneDetection) {
+                hasCellPhone = true
+                let [x, y, width, height] = bestCellPhoneDetection.bbox
+
+                // Add padding around detected cell phone
+                const paddingX = width * 0.1
+                const paddingY = height * 0.1
+
+                cellPhoneBox = {
+                    x: Math.max(0, x - paddingX),
+                    y: Math.max(0, y - paddingY),
+                    width: Math.min(videoWidth - x + paddingX, width + paddingX * 2),
+                    height: Math.min(videoHeight - y + paddingY, height + paddingY * 2),
+                }
+
+                console.log(`✅ Cell phone detected! Class: ${bestCellPhoneDetection.class}, Confidence: ${(bestCellPhoneDetection.score * 100).toFixed(1)}%`, {
+                    bbox: cellPhoneBox,
+                    frameSize: { width: videoWidth, height: videoHeight }
+                })
+            } else {
+                console.log("❌ No cell phone-like objects detected")
+                console.log("Detected objects:", detections.map(d => ({
+                    class: d.class,
+                    confidence: (d.score * 100).toFixed(1) + '%',
+                    bbox: d.bbox,
+                    aspectRatio: (d.bbox[2] / d.bbox[3]).toFixed(2)
+                })))
+            }
+
+            const distance = cellPhoneBox
+                ? analyzeDistance(cellPhoneBox, analysisCanvas.width, analysisCanvas.height)
                 : "unknown"
 
             setDetectionStatus({
-                hasFoot,
+                hasCellPhone,
                 distance,
                 lighting,
-                footBoundingBox: footBox,
+                cellPhoneBoundingBox: cellPhoneBox,
             })
 
-            // Update isPositioned based on all checks
-            setIsPositioned(hasFoot && distance === "ideal" && lighting === "ideal")
+            // Update isPositioned - require BOTH cell phone detection AND proper distance/lighting
+            if (hasCellPhone) {
+                // If we detected cell phone, require ideal distance AND lighting
+                setIsPositioned(distance === "ideal" && lighting === "ideal")
+            } else {
+                // No cell phone detected - don't allow capture
+                setIsPositioned(false)
+            }
         } catch (err) {
             console.error("Detection error:", err)
+            // Don't show error to user for detection failures, just log
         }
-    }, [detector, step, analyzeLighting, analyzeDistance])
+    }, [detector, step, analyzeLighting, analyzeDistance, detectCellPhoneWithImageProcessing])
 
     // Start detection loop
     useEffect(() => {
@@ -418,32 +616,43 @@ export default function CapturePage() {
 
     // Get status messages
     const getStatusMessage = () => {
-        if (!detectionStatus.hasFoot) {
-            return "Place your foot in the frame"
+        if (!detectionStatus.hasCellPhone) {
+            return "Place your cell phone in the frame"
         }
 
-        const issues: string[] = []
-        if (detectionStatus.distance === "too-far") {
-            issues.push("Move closer")
-        } else if (detectionStatus.distance === "too-close") {
-            issues.push("Move farther")
-        }
-        if (detectionStatus.lighting === "too-dark") {
-            issues.push("Find brighter lighting")
-        } else if (detectionStatus.lighting === "too-bright") {
-            issues.push("Reduce lighting")
+        // Cell phone detected but not in right position
+        if (detectionStatus.hasCellPhone && !isPositioned) {
+            const messages: string[] = ["Cell phone detected! Move your cell phone to the right position"]
+
+            if (detectionStatus.distance === "too-far") {
+                messages.push("Go further")
+            } else if (detectionStatus.distance === "too-close") {
+                messages.push("Close enough")
+            } else if (detectionStatus.distance === "ideal") {
+                messages.push("Distance OK")
+            }
+
+            if (detectionStatus.lighting === "too-dark") {
+                messages.push("Find brighter lighting")
+            } else if (detectionStatus.lighting === "too-bright") {
+                messages.push("Reduce lighting")
+            }
+
+            return messages.join(" • ")
         }
 
-        if (issues.length === 0) {
-            return "Good position - Ready!"
+        // Cell phone detected and positioned correctly
+        if (detectionStatus.hasCellPhone && isPositioned) {
+            return "Perfect! Ready to capture"
         }
 
-        return issues.join(" • ")
+        return "Place your cell phone in the frame"
     }
 
     const getStatusColor = () => {
-        if (!detectionStatus.hasFoot) return "bg-yellow-500/90"
-        if (isPositioned) return "bg-green-500/90"
+        // Only green if cell phone is detected AND properly positioned
+        if (isPositioned && detectionStatus.hasCellPhone) return "bg-green-500/90"
+        // Red if no cell phone detected or not properly positioned
         return "bg-red-500/90"
     }
 
@@ -499,85 +708,162 @@ export default function CapturePage() {
                             {/* Hidden canvas for analysis */}
                             <canvas ref={analysisCanvasRef} className="hidden" />
 
-                            {/* Foot Detection Overlay */}
-                            {detectionStatus.footBoundingBox && (
+                            {/* Object Detection Overlays - Show all detected objects with bounding boxes */}
+                            {detectedObjects.map((detection, index) => {
+                                const [x, y, width, height] = detection.bbox
+                                const videoWidth = videoRef.current?.videoWidth || 640
+                                const videoHeight = videoRef.current?.videoHeight || 480
+                                const isCellPhone = detectionStatus.hasCellPhone && detectionStatus.cellPhoneBoundingBox &&
+                                    Math.abs(detectionStatus.cellPhoneBoundingBox.x - x) < 20 &&
+                                    Math.abs(detectionStatus.cellPhoneBoundingBox.y - y) < 20
+
+                                return (
+                                    <div
+                                        key={index}
+                                        className="absolute pointer-events-none z-10"
+                                        style={{
+                                            left: `${(x / videoWidth) * 100}%`,
+                                            top: `${(y / videoHeight) * 100}%`,
+                                            width: `${(width / videoWidth) * 100}%`,
+                                            height: `${(height / videoHeight) * 100}%`,
+                                            border: `2px solid ${isCellPhone ? 'rgb(34, 197, 94)' : 'rgba(59, 130, 246, 0.5)'}`,
+                                            backgroundColor: isCellPhone ? 'rgba(34, 197, 94, 0.1)' : 'rgba(59, 130, 246, 0.05)',
+                                        }}
+                                    >
+                                        {/* Label showing object class and confidence */}
+                                        <div
+                                            className="absolute -top-6 left-0 text-xs font-medium px-2 py-0.5 rounded whitespace-nowrap"
+                                            style={{
+                                                backgroundColor: isCellPhone ? 'rgb(34, 197, 94)' : 'rgba(59, 130, 246, 0.8)',
+                                                color: 'white',
+                                            }}
+                                        >
+                                            {isCellPhone ? '✅ CELL PHONE' : detection.class} ({(detection.score * 100).toFixed(0)}%)
+                                        </div>
+                                    </div>
+                                )
+                            })}
+
+                            {/* Highlight cell phone detection with special border */}
+                            {detectionStatus.cellPhoneBoundingBox && detectionStatus.hasCellPhone && (
                                 <div
-                                    className="absolute border-2 border-blue-400 pointer-events-none z-10"
+                                    className="absolute border-2 border-green-500 pointer-events-none z-10"
                                     style={{
-                                        left: `${(detectionStatus.footBoundingBox.x / (videoRef.current?.videoWidth || 640)) * 100}%`,
-                                        top: `${(detectionStatus.footBoundingBox.y / (videoRef.current?.videoHeight || 480)) * 100}%`,
-                                        width: `${(detectionStatus.footBoundingBox.width / (videoRef.current?.videoWidth || 640)) * 100}%`,
-                                        height: `${(detectionStatus.footBoundingBox.height / (videoRef.current?.videoHeight || 480)) * 100}%`,
-                                        borderColor: detectionStatus.hasFoot ? "rgb(34, 197, 94)" : "rgb(239, 68, 68)",
+                                        left: `${(detectionStatus.cellPhoneBoundingBox.x / (videoRef.current?.videoWidth || 640)) * 100}%`,
+                                        top: `${(detectionStatus.cellPhoneBoundingBox.y / (videoRef.current?.videoHeight || 480)) * 100}%`,
+                                        width: `${(detectionStatus.cellPhoneBoundingBox.width / (videoRef.current?.videoWidth || 640)) * 100}%`,
+                                        height: `${(detectionStatus.cellPhoneBoundingBox.height / (videoRef.current?.videoHeight || 480)) * 100}%`,
+                                        borderColor: "rgb(34, 197, 94)",
+                                        boxShadow: "0 0 10px rgba(34, 197, 94, 0.5)",
                                     }}
                                 />
                             )}
 
-                            {/* Positioning Guide Overlay */}
-                            <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-                                <div className="absolute inset-0 bg-black/40" />
+                            {/* Directional Guidance Arrows - Only show when cell phone detected but not positioned */}
+                            {detectionStatus.hasCellPhone && !isPositioned && (() => {
+                                const guidance = getPositionGuidance()
+                                const showDistance = detectionStatus.distance !== "ideal"
 
-                                <div className="relative">
-                                    <div
-                                        className={`w-64 h-64 sm:w-72 sm:h-72 rounded-2xl border-4 transition-all duration-300 bg-transparent ${isPositioned
-                                            ? "border-green-500 shadow-[0_0_20px_rgba(34,197,94,0.5)]"
-                                            : detectionStatus.hasFoot
-                                                ? "border-yellow-500 shadow-[0_0_20px_rgba(234,179,8,0.5)]"
-                                                : "border-red-500 shadow-[0_0_20px_rgba(239,68,68,0.5)]"
-                                            }`}
-                                        style={{
-                                            boxShadow: isPositioned
-                                                ? "0 0 0 9999px rgba(0,0,0,0.4), 0 0 30px rgba(34,197,94,0.4)"
-                                                : "0 0 0 9999px rgba(0,0,0,0.4), 0 0 30px rgba(239,68,68,0.4)"
-                                        }}
-                                    >
-                                        <div className={`absolute -top-1 -left-1 w-8 h-8 border-t-4 border-l-4 rounded-tl-xl ${isPositioned ? "border-green-500" : "border-red-500"}`} />
-                                        <div className={`absolute -top-1 -right-1 w-8 h-8 border-t-4 border-r-4 rounded-tr-xl ${isPositioned ? "border-green-500" : "border-red-500"}`} />
-                                        <div className={`absolute -bottom-1 -left-1 w-8 h-8 border-b-4 border-l-4 rounded-bl-xl ${isPositioned ? "border-green-500" : "border-red-500"}`} />
-                                        <div className={`absolute -bottom-1 -right-1 w-8 h-8 border-b-4 border-r-4 rounded-br-xl ${isPositioned ? "border-green-500" : "border-red-500"}`} />
+                                return (
+                                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+                                        {/* Center frame indicator */}
+                                        <div
+                                            className={`w-80 h-80 sm:w-96 sm:h-96 md:w-[28rem] md:h-[28rem] rounded-2xl border-4 transition-all duration-300 bg-transparent border-red-500/50`}
+                                        />
+
+                                        {/* Directional arrows */}
+                                        <div className="absolute inset-0 flex items-center justify-center">
+                                            {/* Left Arrow */}
+                                            {guidance.left && (
+                                                <div className="absolute left-4 flex flex-col items-center gap-2 text-red-500">
+                                                    <ArrowLeft className="h-8 w-8 animate-pulse" />
+                                                    <span className="text-xs font-medium bg-black/70 px-2 py-1 rounded">Move left</span>
+                                                </div>
+                                            )}
+
+                                            {/* Right Arrow */}
+                                            {guidance.right && (
+                                                <div className="absolute right-4 flex flex-col items-center gap-2 text-red-500">
+                                                    <ArrowRight className="h-8 w-8 animate-pulse" />
+                                                    <span className="text-xs font-medium bg-black/70 px-2 py-1 rounded">Move right</span>
+                                                </div>
+                                            )}
+
+                                            {/* Up Arrow */}
+                                            {guidance.up && (
+                                                <div className="absolute top-4 flex flex-col items-center gap-2 text-red-500">
+                                                    <ArrowUp className="h-8 w-8 animate-pulse" />
+                                                    <span className="text-xs font-medium bg-black/70 px-2 py-1 rounded">Move up</span>
+                                                </div>
+                                            )}
+
+                                            {/* Down Arrow */}
+                                            {guidance.down && (
+                                                <div className="absolute bottom-4 flex flex-col items-center gap-2 text-red-500">
+                                                    <ArrowDown className="h-8 w-8 animate-pulse" />
+                                                    <span className="text-xs font-medium bg-black/70 px-2 py-1 rounded">Move down</span>
+                                                </div>
+                                            )}
+
+                                            {/* Distance guidance (closer/farther) */}
+                                            {showDistance && (
+                                                <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-2 text-red-500">
+                                                    {detectionStatus.distance === "too-far" ? (
+                                                        <>
+                                                            <ArrowUp className="h-8 w-8 animate-bounce" />
+                                                            <span className="text-xs font-medium bg-black/70 px-2 py-1 rounded">Move closer</span>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <ArrowDown className="h-8 w-8 animate-bounce" />
+                                                            <span className="text-xs font-medium bg-black/70 px-2 py-1 rounded">Move farther</span>
+                                                        </>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
-                                </div>
-                            </div>
+                                )
+                            })()}
 
                             {/* Status Indicator */}
-                            <div className="absolute top-24 left-0 right-0 flex justify-center z-20">
-                                <div
-                                    className={`px-5 py-2.5 rounded-full flex items-center gap-2 backdrop-blur-sm transition-all duration-300 ${getStatusColor()} text-white`}
-                                >
-                                    {isPositioned ? (
-                                        <>
-                                            <Check className="h-5 w-5" />
-                                            <span className="font-medium">{getStatusMessage()}</span>
-                                        </>
-                                    ) : (
-                                        <>
-                                            {!detectionStatus.hasFoot && <Move className="h-5 w-5 animate-pulse" />}
-                                            {detectionStatus.distance === "too-far" && <ArrowDown className="h-5 w-5 animate-bounce" />}
-                                            {detectionStatus.distance === "too-close" && <ArrowUp className="h-5 w-5 animate-bounce" />}
-                                            {detectionStatus.lighting === "too-dark" && <Sun className="h-5 w-5 animate-pulse" />}
-                                            {detectionStatus.lighting === "too-bright" && <Moon className="h-5 w-5 animate-pulse" />}
-                                            <span className="font-medium">{getStatusMessage()}</span>
-                                        </>
-                                    )}
+                            {!isPositioned && (
+                                <div className="absolute top-24 left-0 right-0 flex justify-center z-20">
+                                    <div
+                                        className={`px-5 py-2.5 rounded-full flex items-center gap-2 backdrop-blur-sm transition-all duration-300 ${getStatusColor()} text-white`}
+                                    >
+                                        {!detectionStatus.hasCellPhone && <Move className="h-5 w-5 animate-pulse" />}
+                                        {detectionStatus.hasCellPhone && detectionStatus.distance === "too-far" && <ArrowDown className="h-5 w-5 animate-bounce" />}
+                                        {detectionStatus.hasCellPhone && detectionStatus.distance === "too-close" && <ArrowUp className="h-5 w-5 animate-bounce" />}
+                                        {detectionStatus.lighting === "too-dark" && <Sun className="h-5 w-5 animate-pulse" />}
+                                        {detectionStatus.lighting === "too-bright" && <Moon className="h-5 w-5 animate-pulse" />}
+                                        <span className="font-medium">{getStatusMessage()}</span>
+                                    </div>
                                 </div>
-                            </div>
+                            )}
 
                             {/* Detailed Status Indicators */}
-                            {detectionStatus.hasFoot && (
+                            {detectionStatus.hasCellPhone && !isPositioned && (
                                 <div className="absolute top-32 left-0 right-0 flex justify-center gap-2 z-20">
                                     {detectionStatus.distance !== "ideal" && (
                                         <div className="px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-sm text-white text-xs flex items-center gap-1">
                                             {detectionStatus.distance === "too-far" ? (
                                                 <>
                                                     <ArrowDown className="h-4 w-4" />
-                                                    Too far
+                                                    Go further
                                                 </>
                                             ) : (
                                                 <>
                                                     <ArrowUp className="h-4 w-4" />
-                                                    Too close
+                                                    Close enough
                                                 </>
                                             )}
+                                        </div>
+                                    )}
+                                    {detectionStatus.distance === "ideal" && (
+                                        <div className="px-3 py-1.5 rounded-full bg-green-500/80 backdrop-blur-sm text-white text-xs flex items-center gap-1">
+                                            <Check className="h-4 w-4" />
+                                            Distance OK
                                         </div>
                                     )}
                                     {detectionStatus.lighting !== "ideal" && (

@@ -22,6 +22,47 @@ Continue building your app on:
 
 **[https://v0.app/chat/RZ7JYb16AaA](https://v0.app/chat/RZ7JYb16AaA)**
 
+## Local Development
+
+### Prerequisites
+
+- Node.js (v18 or higher)
+- pnpm (package manager)
+
+### Setup
+
+1. **Install dependencies:**
+   ```bash
+   pnpm install
+   ```
+
+2. **Set up environment variables:**
+   
+   Create a `.env.local` file in the root directory with your Supabase credentials:
+   ```env
+   NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
+   NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+   ```
+
+3. **Run the development server:**
+   ```bash
+   pnpm dev
+   ```
+   
+   The app will be available at `http://localhost:3000`
+
+### Production Build
+
+To build and run a production version locally:
+
+```bash
+# Build the app
+pnpm build
+
+# Start the production server
+pnpm start
+```
+
 ## How It Works
 
 1. Create and modify your project using [v0.app](https://v0.app)

@@ -67,23 +67,23 @@ export default function WoundDetailsPage() {
         const imagesWithUrls = await Promise.all(
           imagesData.map(async (image) => {
             if (!image.image_url) return image;
-            
+
             // Try to extract file path from URL (format: https://...supabase.co/storage/v1/object/public/ulcer-images/user_id/timestamp.jpg)
             // Or if it's already a path: user_id/timestamp.jpg
             let filePath = image.image_url;
-            
+
             // Extract path from full public URL
             const urlMatch = image.image_url.match(/ulcer-images\/(.+)$/);
             if (urlMatch) {
               filePath = urlMatch[1];
             }
-            
+
             // Try to create a signed URL (works for private buckets)
             try {
               const { data: signedData, error: signedError } = await supabase.storage
                 .from("ulcer-images")
                 .createSignedUrl(filePath, 3600); // 1 hour expiry
-              
+
               if (!signedError && signedData?.signedUrl) {
                 console.log("Using signed URL for:", filePath);
                 return { ...image, image_url: signedData.signedUrl };
@@ -91,7 +91,7 @@ export default function WoundDetailsPage() {
             } catch (err) {
               console.warn("Could not create signed URL, using original:", err);
             }
-            
+
             // Fallback to original URL (works if bucket is public)
             return image;
           })
@@ -108,34 +108,34 @@ export default function WoundDetailsPage() {
   }, [supabase, router])
 
   // Calculate stats
-  const currentSize = images.length > 0 && images[images.length - 1].ulcer_size 
-    ? images[images.length - 1].ulcer_size 
+  const currentSize = images.length > 0 && images[images.length - 1].ulcer_size
+    ? images[images.length - 1].ulcer_size
     : 4.2
-  const firstSize = images.length > 0 && images[0].ulcer_size 
-    ? images[0].ulcer_size 
+  const firstSize = images.length > 0 && images[0].ulcer_size
+    ? images[0].ulcer_size
     : 6.5
   const percentChange = firstSize > 0 ? ((firstSize - currentSize) / firstSize * 100).toFixed(1) : 0
   const isImproving = Number(percentChange) > 0
 
   const locale = language === 'ar' ? 'ar-SA' : 'en-US'
-  
-  const lastUpload = images.length > 0 
+
+  const lastUpload = images.length > 0
     ? new Date(images[images.length - 1].created_at).toLocaleDateString(locale, { month: "short", day: "numeric" })
     : "No uploads"
 
   // Prepare chart data
-  const chartData = images.length > 0 
+  const chartData = images.length > 0
     ? images.map(img => ({
-        date: new Date(img.created_at).toLocaleDateString(locale, { month: "short", day: "numeric" }),
-        size: img.ulcer_size || 5
-      }))
+      date: new Date(img.created_at).toLocaleDateString(locale, { month: "short", day: "numeric" }),
+      size: img.ulcer_size || 5
+    }))
     : [
-        { date: "Nov 20", size: 6.5 },
-        { date: "Dec 5", size: 5.8 },
-        { date: "Dec 20", size: 5.0 },
-        { date: "Jan 5", size: 4.8 },
-        { date: "Jan 20", size: 4.2 },
-      ]
+      { date: "Nov 20", size: 6.5 },
+      { date: "Dec 5", size: 5.8 },
+      { date: "Dec 20", size: 5.0 },
+      { date: "Jan 5", size: 4.8 },
+      { date: "Jan 20", size: 4.2 },
+    ]
 
   // Prognosis based on improvement
   const getPrognosis = () => {
@@ -219,32 +219,32 @@ export default function WoundDetailsPage() {
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                  <XAxis 
-                    dataKey="date" 
+                  <XAxis
+                    dataKey="date"
                     tick={{ fontSize: 12 }}
                     tickLine={false}
                     axisLine={{ stroke: "#e5e7eb" }}
                   />
-                  <YAxis 
+                  <YAxis
                     tick={{ fontSize: 12 }}
                     tickLine={false}
                     axisLine={{ stroke: "#e5e7eb" }}
                     label={{ value: "Size (cm²)", angle: -90, position: "insideLeft", style: { fontSize: 12 } }}
                     domain={[0, 'auto']}
                   />
-                  <Tooltip 
-                    contentStyle={{ 
-                      backgroundColor: 'white', 
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: 'white',
                       border: '1px solid #e5e7eb',
                       borderRadius: '8px',
                       padding: '8px 12px'
                     }}
                     formatter={(value: number) => [`${value} cm²`, 'Size']}
                   />
-                  <Line 
-                    type="monotone" 
-                    dataKey="size" 
-                    stroke="hsl(221, 83%, 53%)" 
+                  <Line
+                    type="monotone"
+                    dataKey="size"
+                    stroke="hsl(221, 83%, 53%)"
                     strokeWidth={2}
                     dot={{ fill: "hsl(221, 83%, 53%)", strokeWidth: 2, r: 4 }}
                     activeDot={{ r: 6 }}

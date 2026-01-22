@@ -69,13 +69,13 @@ export default function AnalysisPage({ params }: { params: Promise<{ id: string 
           if (urlMatch) {
             filePath = urlMatch[1];
           }
-          
+
           // Try to create a signed URL
           try {
             const { data: signedData } = await supabase.storage
               .from("ulcer-images")
               .createSignedUrl(filePath, 3600); // 1 hour expiry
-            
+
             if (signedData?.signedUrl) {
               imageUrl = signedData.signedUrl;
             }
@@ -83,7 +83,7 @@ export default function AnalysisPage({ params }: { params: Promise<{ id: string 
             console.warn("Could not create signed URL, using original:", err);
           }
         }
-        
+
         setData({ ...imageData, image_url: imageUrl })
       }
 
@@ -180,7 +180,7 @@ export default function AnalysisPage({ params }: { params: Promise<{ id: string 
                 <div className="w-3/5 h-3/5 border-4 border-amber-400 rounded-lg" />
               </div>
             </div>
-            
+
             {data.notes && (
               <div className="bg-slate-100 rounded-lg p-4">
                 <p className="text-sm">

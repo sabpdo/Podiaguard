@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -31,6 +31,17 @@ export default function LoginPage() {
   const router = useRouter();
   const supabase = getSupabaseBrowserClient();
 
+  // Check for error in URL params (from auth callback)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const errorParam = params.get("error");
+    if (errorParam) {
+      setError(decodeURIComponent(errorParam));
+      // Clean up URL
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
+
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
@@ -47,7 +58,7 @@ export default function LoginPage() {
         // Redirect to auth callback which will handle routing based on user role
         const emailRedirectTo = `${baseUrl}/auth/callback`;
 
-        const { error } = await supabase.auth.signUp({
+        const { data, error } = await supabase.auth.signUp({
           email,
           password,
           options: {
@@ -57,8 +68,27 @@ export default function LoginPage() {
             },
           },
         });
-        if (error) throw error;
-        setMessage(t.login.checkEmail);
+
+        if (error) {
+          console.error('Signup error:', error);
+          throw error;
+        }
+
+        // Check if email confirmation is required
+        if (data.user && !data.session) {
+          // Email confirmation required
+          setMessage(t.login.checkEmail);
+        } else if (data.session) {
+          // Email confirmation disabled - user is automatically signed in
+          const userRole = data.user?.user_metadata?.role || "patient";
+          if (userRole === "clinician") {
+            router.push("/clinician/register");
+          } else {
+            router.push("/privacy-agreement");
+          }
+        } else {
+          setMessage(t.login.checkEmail);
+        }
       } else {
         const { data, error } = await supabase.auth.signInWithPassword({
           email,

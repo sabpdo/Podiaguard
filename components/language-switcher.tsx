@@ -17,7 +17,7 @@ export function LanguageSwitcher({ className }: { className?: string }) {
   const toggleLanguage = () => {
     setLanguage(language === 'en' ? 'ar' : 'en')
   }
-  
+
   // Don't render until mounted to avoid hydration mismatch
   if (!mounted) {
     return null

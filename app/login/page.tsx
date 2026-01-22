@@ -39,10 +39,11 @@ export default function LoginPage() {
 
     try {
       if (isSignUp) {
-        // Always use production URL for email confirmations
-        // This ensures confirmation emails always point to production, not localhost
-        // Even when testing locally, emails should redirect to production
-        const baseUrl = process.env.NEXT_PUBLIC_SITE_URL || 'https://podiguard.vercel.app';
+        // Use NEXT_PUBLIC_SITE_URL if set, otherwise use current origin
+        // This sets the redirect URL in the confirmation email
+        const baseUrl =
+          process.env.NEXT_PUBLIC_SITE_URL ||
+          (typeof window !== 'undefined' ? window.location.origin : '');
         // Redirect to auth callback which will handle routing based on user role
         const emailRedirectTo = `${baseUrl}/auth/callback`;
 
